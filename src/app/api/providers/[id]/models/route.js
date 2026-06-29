@@ -4,6 +4,7 @@ import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/sha
 import { GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
+import { getProviderModels, PROVIDER_ID_TO_ALIAS } from "open-sse/config/providerModels.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
 
@@ -243,6 +244,12 @@ const PROVIDER_MODELS_CONFIG = {
   "vercel-ai-gateway": createOpenAIModelsConfig("https://ai-gateway.vercel.sh/v1/models"),
 
   // Custom resolvers (non-OpenAI-shaped APIs / token-refresh flows)
+  merlin: {
+    customResolver: async (connection) => ({
+      models: getProviderModels(PROVIDER_ID_TO_ALIAS[connection.provider] || connection.provider),
+      warning: "Merlin does not expose a reliable public models endpoint; showing 9Router's static catalog.",
+    }),
+  },
   kiro: {
     customResolver: async (connection) => {
       const credentials = {

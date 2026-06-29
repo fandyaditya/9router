@@ -4,6 +4,8 @@ import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
 
+export const MERLIN_FIREBASE_API_KEY = "AIzaSyAvCgtQ4XbmlQGIynDT-v_M8eLaXrKmtiM";
+
 let _xaiServiceSingleton = null;
 export async function refreshXaiToken(refreshToken, log) {
   if (!refreshToken) return null;
@@ -158,6 +160,82 @@ export async function refreshGoogleToken(refreshToken, clientId, clientSecret, l
   }, log);
 }
 
+export async function refreshMerlinToken(refreshToken, credentials = {}, log) {
+  if (!refreshToken) return null;
+  const providerSpecificData = credentials.providerSpecificData || {};
+  const firebaseApiKey =
+    providerSpecificData.firebaseApiKey ||
+    providerSpecificData.firebase_api_key ||
+    credentials.firebaseApiKey ||
+    credentials.firebase_api_key ||
+    process.env.NINEROUTER_MERLIN_FIREBASE_API_KEY ||
+    process.env.MERLIN_FIREBASE_API_KEY ||
+    MERLIN_FIREBASE_API_KEY;
+
+  if (!firebaseApiKey) {
+    log?.warn?.("TOKEN_REFRESH", "Merlin refresh token present, but Firebase API key is missing.");
+    return null;
+  }
+
+  return dedupRefresh("merlin", refreshToken, async () => {
+    try {
+      const response = await fetch(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(firebaseApiKey)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        const failure = classifyOAuthRefreshError(errorText, response.status);
+        log?.warn?.("TOKEN_REFRESH", "Failed to refresh Merlin token", {
+          status: response.status,
+          code: failure.code,
+          error: failure.description,
+        });
+        return failure.permanent ? { error: failure.code || "invalid_grant" } : null;
+      }
+
+      const tokens = await response.json();
+      const accessToken = tokens.id_token || tokens.access_token;
+      if (!accessToken) {
+        log?.warn?.("TOKEN_REFRESH", "Merlin refresh response did not include an ID token");
+        return null;
+      }
+
+      log?.info?.("TOKEN_REFRESH", "Successfully refreshed Merlin token", {
+        hasNewAccessToken: true,
+        hasNewRefreshToken: !!tokens.refresh_token,
+        expiresIn: tokens.expires_in,
+      });
+
+      return {
+        accessToken,
+        idToken: tokens.id_token || accessToken,
+        refreshToken: tokens.refresh_token || refreshToken,
+        expiresIn: Number(tokens.expires_in) || 3600,
+        projectId: tokens.project_id || providerSpecificData.projectId,
+        lastRefreshAt: new Date().toISOString(),
+        providerSpecificData: {
+          ...providerSpecificData,
+          firebaseApiKey,
+          localId: tokens.user_id || providerSpecificData.localId || null,
+          projectId: tokens.project_id || providerSpecificData.projectId || null,
+        },
+      };
+    } catch (error) {
+      log?.warn?.("TOKEN_REFRESH", `Network error refreshing Merlin token: ${error.message}`);
+      return null;
+    }
+  }, log);
+}
+
 export async function refreshQwenToken(refreshToken, log) {
   if (!refreshToken) return null;
   return dedupRefresh("qwen", refreshToken, async () => {
@@ -221,13 +299,17 @@ export function classifyOAuthRefreshError(errorText = "", status = 0) {
   }
 
   const code = parsed?.error?.code || parsed?.error || parsed?.error_code || "";
-  const description = parsed?.error_description || parsed?.message || errorText || "";
+  const description = parsed?.error?.message || parsed?.error_description || parsed?.message || errorText || "";
   const combined = `${code} ${description}`.toLowerCase();
   const permanent = [
     "refresh_token_expired",
     "refresh_token_reused",
     "refresh_token_invalidated",
+    "invalid_refresh_token",
     "invalid_grant",
+    "token_expired",
+    "user_not_found",
+    "user_disabled",
   ].some((marker) => combined.includes(marker));
 
   return { status, code, description, permanent };

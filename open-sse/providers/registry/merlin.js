@@ -1,0 +1,53 @@
+export default {
+  id: "merlin",
+  priority: 155,
+  alias: "merlin",
+  aliases: [
+    "ml",
+  ],
+  uiAlias: "ml",
+  display: {
+    name: "Merlin AI (Subscription)",
+    icon: "auto_awesome",
+    color: "#7C3AED",
+    textIcon: "ML",
+    website: "https://www.getmerlin.in",
+    notice: {
+      text: "Uses a Merlin web/desktop session token. Merlin does not currently provide a public API, so reconnect if the session expires.",
+      signupUrl: "https://www.getmerlin.in",
+    },
+  },
+  category: "oauth",
+  authType: "oauth",
+  authHint: "Import a token from https://session.getmerlin.in/?from=web after signing in to Merlin.",
+  transport: {
+    baseUrl: "https://arcane.getmerlin.in/v1/thread/unified",
+    format: "merlin",
+    headers: {
+      "x-merlin-version": "web-merlin",
+    },
+    auth: {
+      combined: true,
+      header: "Authorization",
+      scheme: "bearer",
+    },
+    forceStream: true,
+  },
+  models: [
+    { id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite (via Merlin)" },
+    { id: "minimax-m2.7", name: "MiniMax M2.7 (via Merlin)" },
+    { id: "claude-4.5-haiku", name: "Claude Haiku 4.5 (via Merlin)" },
+    { id: "kimi-k2.6", name: "Kimi K2.6 (via Merlin)" },
+    { id: "grok-4.3", name: "Grok 4.3 (via Merlin)" },
+    { id: "deepseek-v4-pro", name: "DeepSeek v4 Pro (via Merlin)" },
+    { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (via Merlin)" },
+    { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash (via Merlin)" },
+    { id: "glm-5.1", name: "GLM 5.1 (via Merlin)" },
+    { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite (via Merlin)" },
+    { id: "gpt-5.5", name: "GPT 5.5 (via Merlin)" },
+    { id: "gpt-5.4", name: "GPT 5.4 (via Merlin)" },
+    { id: "claude-4.6-sonnet", name: "Claude Sonnet 4.6 (via Merlin)" },
+    { id: "claude-4.8-opus", name: "Claude Opus 4.8 (via Merlin)" },
+  ],
+  passthroughModels: true,
+};

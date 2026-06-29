@@ -18,6 +18,7 @@ import {
   KILOCODE_CONFIG,
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
+import { validateMerlinToken } from "open-sse/executors/merlin.js";
 
 // OAuth provider test endpoints
 const OAUTH_TEST_CONFIG = {
@@ -90,6 +91,7 @@ const OAUTH_TEST_CONFIG = {
     authHeader: "Authorization",
     authPrefix: "Bearer ",
   },
+  merlin: { custom: true },
   "codebuddy-cn": { tokenExists: true },
 };
 
@@ -281,6 +283,35 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
   let accessToken = connection.accessToken;
   let refreshed = false;
   let newTokens = null;
+
+  if (connection.provider === "merlin") {
+    const initial = await validateMerlinToken(accessToken, { proxyOptions: effectiveProxy });
+    if (initial.valid || !connection.refreshToken) {
+      const error = initial.valid
+        ? initial.error
+        : "Merlin token invalid or expired and no refresh token was imported. Re-import the full session JSON from getmerlin.in.";
+      return { valid: initial.valid, error, refreshed: false, newTokens: null };
+    }
+
+    const tokens = await refreshProviderCredentials("merlin", connection, console);
+    if (!tokens?.accessToken) {
+      const hasFirebaseApiKey =
+        !!connection.providerSpecificData?.firebaseApiKey ||
+        !!connection.providerSpecificData?.firebase_api_key ||
+        !!process.env.NINEROUTER_MERLIN_FIREBASE_API_KEY ||
+        !!process.env.MERLIN_FIREBASE_API_KEY;
+      return {
+        valid: false,
+        error: hasFirebaseApiKey
+          ? (initial.error || "Merlin token invalid and automatic refresh failed")
+          : "Merlin refresh token was imported, but Firebase API key is missing. Re-import the full session JSON or set MERLIN_FIREBASE_API_KEY.",
+        refreshed: false,
+      };
+    }
+
+    const retry = await validateMerlinToken(tokens.accessToken, { proxyOptions: effectiveProxy });
+    return { valid: retry.valid, error: retry.error, refreshed: true, newTokens: tokens };
+  }
 
   const tokenExpired = isTokenExpired(connection);
   if (config.refreshable && tokenExpired && connection.refreshToken) {
