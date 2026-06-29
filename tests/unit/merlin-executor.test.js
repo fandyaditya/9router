@@ -6,6 +6,7 @@ import {
   normalizeMerlinToken,
   parseMerlinSessionData,
   parseOpenAIMessages,
+  sanitizeMerlinContent,
   validateMerlinToken,
 } from "../../open-sse/executors/merlin.js";
 import { getProviderModels } from "../../open-sse/config/providerModels.js";
@@ -132,13 +133,17 @@ describe("Merlin request mapping", () => {
     expect(parsed.current).toBe("Q2");
   });
 
-  it("builds Merlin unified chat payload", () => {
+  it("builds Merlin unified chat payload without enabling Merlin-side tools", () => {
     const body = {
       messages: [
         { role: "system", content: "Be brief" },
         { role: "user", content: "Hello" },
       ],
       webAccess: true,
+      tools: [{
+        type: "function",
+        function: { name: "Search", description: "Search the web" },
+      }],
     };
     const request = buildMerlinRequest("gpt-5", body);
 
@@ -146,7 +151,28 @@ describe("Merlin request mapping", () => {
     expect(request.model).toBe("gpt-5");
     expect(request.message.content).toBe("Hello");
     expect(request.message.context).toContain("Be brief");
-    expect(request.metadata.webAccess).toBe(true);
+    expect(request.message.context).toContain("Merlin built-in tools and modes");
+    expect(request.message.context).toContain("Search, web access, browser, document, image, code");
+    expect(request.message.context).not.toContain("- Search:");
+    expect(request.metadata.webAccess).toBe(false);
+  });
+
+  it("removes Merlin internal-tool canned responses", () => {
+    const searchOff = `I tried looking up-to-date information as a necessary step in response generation, but Search is off. To get more up-to-date and accurate information on this topic, I’d need you to turn Search on. You can do that by clicking on the 🌐 (globe) icon in the Chat box below.
+
+
+  !Instructions 
+
+
+  Once you’re done, you can retry this prompt.`;
+
+    const imageOff = "Please enable the image generation tool to continue, then try again.";
+    const documentOff = "I tried reading the attached document as a necessary step in response generation, but document tools are unavailable. Once you're done, you can retry this prompt.";
+
+    expect(sanitizeMerlinContent(searchOff)).toBe("");
+    expect(sanitizeMerlinContent(imageOff)).toBe("");
+    expect(sanitizeMerlinContent(documentOff)).toBe("");
+    expect(sanitizeMerlinContent(`Answer first.\n\n${searchOff}\n\nAnswer after.`)).toBe("Answer first.\n\nAnswer after.");
   });
 });
 
@@ -230,9 +256,24 @@ describe("MerlinExecutor.execute", () => {
 
     const text = await result.response.text();
     expect(text).toContain("\"object\":\"chat.completion.chunk\"");
-    expect(text).toContain("\"content\":\"hello \"");
-    expect(text).toContain("\"content\":\"world\"");
+    expect(text).toContain("\"content\":\"hello world\"");
     expect(text).toContain("data: [DONE]");
+  });
+
+  it("strips Merlin Search-disabled artifacts from non-streaming responses", async () => {
+    const searchOff = "I tried looking up-to-date information as a necessary step in response generation, but Search is off. To get more up-to-date and accurate information on this topic, I’d need you to turn Search on. You can do that by clicking on the 🌐 (globe) icon in the Chat box below.\n\n!Instructions\n\nOnce you’re done, you can retry this prompt.";
+    global.fetch = vi.fn(async () => mockMerlinStream([{ data: { content: searchOff } }]));
+
+    const exec = new MerlinExecutor();
+    const result = await exec.execute({
+      model: "gpt-5",
+      body: { messages: [{ role: "user", content: "latest news?" }], stream: false },
+      stream: false,
+      credentials: { accessToken: "token-1" },
+    });
+
+    const json = await result.response.json();
+    expect(json.choices[0].message.content).toBe("");
   });
 
   it("refreshes expired Merlin credentials before calling the chat API", async () => {

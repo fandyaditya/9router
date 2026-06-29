@@ -8,6 +8,17 @@ import { refreshProviderCredentials } from "../services/oauthCredentialManager.j
 const MERLIN_CHAT_API = PROVIDERS.merlin.baseUrl;
 const MERLIN_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 const MERLIN_DEFAULT_MODEL = "merlin-magic";
+const MERLIN_NO_TOOL_INSTRUCTION = [
+  "9Router adapter note: Merlin built-in tools and modes are unavailable, including Search, web access, browser, document, image, code, and any Merlin app-side tool.",
+  "Do not attempt to use or mention Merlin built-in tools, and never ask the user to enable a Merlin tool, mode, toggle, or icon.",
+  "If client tool results are present in the conversation, answer from those results. Otherwise answer directly from the provided context and model knowledge.",
+].join(" ");
+
+const MERLIN_INTERNAL_TOOL_ARTIFACT_PATTERNS = [
+  /I tried [\s\S]{0,300} as a necessary step in response generation,\s*but [\s\S]{0,80} (?:is|are) (?:off|disabled|unavailable)\.[\s\S]*?(?:Once you[’']re done,\s*you can retry this prompt\.|retry this prompt\.)/gi,
+  /To get [\s\S]{0,300},\s*I[’']?d need you to turn [\s\S]{0,80} on\.[\s\S]*?(?:Once you[’']re done,\s*you can retry this prompt\.|retry this prompt\.)/gi,
+  /(?:Please|You need to|I need you to) (?:enable|turn on) [\s\S]{0,80}(?:tool|mode|access|search|browser|image|document|code)[\s\S]*?(?:retry this prompt|try again|continue)\.?/gi,
+];
 
 function fetchMerlin(url, options, proxyOptions = null) {
   const hasProxy =
@@ -59,22 +70,61 @@ export function parseOpenAIMessages(messages = []) {
   return { system: system.trim(), history, current };
 }
 
-function buildContext(parsed, tools) {
-  const context = [];
+function buildContext(parsed) {
+  const context = [MERLIN_NO_TOOL_INSTRUCTION];
   if (parsed.system) context.push(`system: ${parsed.system}`);
   for (const msg of parsed.history) context.push(`${msg.role}: ${msg.content}`);
 
-  if (Array.isArray(tools) && tools.length > 0) {
-    const toolLines = tools.map((tool) => {
-      const fn = tool?.function || tool || {};
-      const name = fn.name || "unnamed";
-      const description = (fn.description || "").split("\n")[0].slice(0, 200);
-      return `- ${name}: ${description}`;
-    });
-    context.push(`Available tools are informational only; do not call them directly:\n${toolLines.join("\n")}`);
+  return context.join("\n");
+}
+
+export function sanitizeMerlinContent(content) {
+  const text = String(content || "");
+  if (!text) return "";
+
+  let sanitized = text;
+  for (const pattern of MERLIN_INTERNAL_TOOL_ARTIFACT_PATTERNS) {
+    sanitized = sanitized.replace(pattern, "");
   }
 
-  return context.join("\n");
+  sanitized = sanitized
+    .replace(/\n\s*!Instructions\s*\n/gi, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (/^[\s,.;:!-]*(?:then\s*)?(?:try again|retry this prompt|continue)?[\s.]*$/i.test(sanitized)) {
+    return "";
+  }
+
+  const lower = sanitized.toLowerCase();
+  if (
+    (
+      lower.includes("retry this prompt") ||
+      lower.includes("click") ||
+      lower.includes("turn") ||
+      lower.includes("enable")
+    ) &&
+    (
+      lower.includes(" is off") ||
+      lower.includes(" are off") ||
+      lower.includes("disabled") ||
+      lower.includes("unavailable")
+    ) &&
+    (
+      lower.includes("tool") ||
+      lower.includes("search") ||
+      lower.includes("web access") ||
+      lower.includes("browser") ||
+      lower.includes("document") ||
+      lower.includes("image") ||
+      lower.includes("code") ||
+      lower.includes("globe")
+    )
+  ) {
+    return "";
+  }
+
+  return sanitized;
 }
 
 export function buildMerlinRequest(model, body) {
@@ -87,7 +137,7 @@ export function buildMerlinRequest(model, body) {
     language: "AUTO",
     message: {
       content,
-      context: buildContext(parsed, body?.tools),
+      context: buildContext(parsed),
       childId: crypto.randomUUID(),
       id: crypto.randomUUID(),
       parentId: "root",
@@ -98,7 +148,7 @@ export function buildMerlinRequest(model, body) {
       largeContext: false,
       merlinMagic: model === "merlin-magic",
       proFinderMode: false,
-      webAccess: body?.webAccess === true || body?.web_access === true,
+      webAccess: false,
     },
   };
 }
@@ -416,6 +466,7 @@ function buildStreamingResponse(eventStream, model, cid, created, signal) {
           choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null, logprobs: null }],
         })));
 
+        let fullContent = "";
         for await (const chunk of extractMerlinContent(eventStream, signal)) {
           if (chunk.error) {
             controller.enqueue(encoder.encode(sseChunk({
@@ -428,15 +479,18 @@ function buildStreamingResponse(eventStream, model, cid, created, signal) {
             break;
           }
           if (chunk.done) break;
-          if (chunk.delta) {
-            controller.enqueue(encoder.encode(sseChunk({
-              id: cid,
-              object: "chat.completion.chunk",
-              created,
-              model,
-              choices: [{ index: 0, delta: { content: chunk.delta }, finish_reason: null, logprobs: null }],
-            })));
-          }
+          if (chunk.delta) fullContent += chunk.delta;
+        }
+
+        const sanitized = sanitizeMerlinContent(fullContent);
+        if (sanitized) {
+          controller.enqueue(encoder.encode(sseChunk({
+            id: cid,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [{ index: 0, delta: { content: sanitized }, finish_reason: null, logprobs: null }],
+          })));
         }
 
         controller.enqueue(encoder.encode(sseChunk({
@@ -475,6 +529,8 @@ async function buildNonStreamingResponse(eventStream, model, cid, created, promp
     if (chunk.done) break;
     if (chunk.delta) fullContent += chunk.delta;
   }
+
+  fullContent = sanitizeMerlinContent(fullContent);
 
   const promptTokens = Math.ceil(String(promptText || "").length / 4);
   const completionTokens = Math.ceil(fullContent.length / 4);
